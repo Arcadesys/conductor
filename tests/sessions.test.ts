@@ -13,6 +13,9 @@ afterEach(() => {
   delete process.env.CONDUCTOR_OPEN_BIN;
   delete process.env.CONDUCTOR_SESSION_MODEL;
   delete process.env.CONDUCTOR_SESSION_PERMISSION_MODE;
+  delete process.env.CONDUCTOR_SESSION_CODEX_MODEL;
+  delete process.env.CONDUCTOR_SESSION_CODEX_SANDBOX;
+  delete process.env.CONDUCTOR_SESSION_CODEX_APPROVAL;
 });
 
 function createFakeOpen(directory: string, behavior: "succeed" | "fail") {
@@ -30,7 +33,7 @@ ${behavior === "fail" ? 'process.stderr.write("Unable to find application named 
   return { path, receivedArgsPath };
 }
 
-describe("interactive Claude Code sessions", () => {
+describe("interactive agent sessions", () => {
   it("runs directly in the project's repo root, seeds a prompt with the location up top, and launches Ghostty in Opus plan mode", async () => {
     const root = mkdtempSync(join(tmpdir(), "conductor-sessions-"));
     const repo = join(root, "repo");
@@ -82,6 +85,87 @@ describe("interactive Claude Code sessions", () => {
     const activity = bootstrap.body.activity.find((item: any) => item.kind === "session.started");
     expect(activity).toBeTruthy();
     expect(activity.message).toContain(repo);
+  });
+
+  it("launches an interactive Codex session with the same repo-root workflow, in read-only/on-request mode by default", async () => {
+    const root = mkdtempSync(join(tmpdir(), "conductor-sessions-"));
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "init"]);
+    const { path: fakeOpen, receivedArgsPath } = createFakeOpen(root, "succeed");
+    process.env.CONDUCTOR_OPEN_BIN = fakeOpen;
+    database = createDatabase(join(root, "test.sqlite"));
+    const { app } = createApp(database);
+
+    const project = await request(app).post("/api/projects").send({
+      key: "CDX",
+      name: "Codex session project",
+      repo_root: repo
+    });
+    const epic = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "epic", title: "Epic" });
+    const story = await request(app).post("/api/issues").send({
+      projectId: project.body.id,
+      type: "story",
+      parentId: epic.body.id,
+      title: "Fix the thing",
+      description: "Some detail.",
+      acceptanceCriteria: ["It works"]
+    });
+
+    const response = await request(app).post(`/api/issues/${story.body.id}/session`).send({ agent: "codex" });
+    expect(response.status).toBe(202);
+    expect(response.body.workspace).toBe(repo);
+    expect(response.body.agent).toBe("codex");
+
+    const args: string[] = JSON.parse(readFileSync(receivedArgsPath, "utf8"));
+    const launchScript = readFileSync(args[4], "utf8");
+    expect(launchScript).toContain("codex");
+    expect(launchScript).toContain("--sandbox 'read-only'");
+    expect(launchScript).toContain("--ask-for-approval 'on-request'");
+    expect(launchScript).not.toContain("--model");
+    expect(launchScript).toContain(repo);
+
+    const bootstrap = await request(app).get("/api/bootstrap");
+    const activity = bootstrap.body.activity.find((item: any) => item.kind === "session.started");
+    expect(activity).toBeTruthy();
+    expect(activity.message).toContain("Codex");
+    expect(activity.message).toContain(repo);
+  });
+
+  it("honors Codex session overrides for model, sandbox, and approval policy", async () => {
+    const root = mkdtempSync(join(tmpdir(), "conductor-sessions-"));
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "init"]);
+    const { path: fakeOpen, receivedArgsPath } = createFakeOpen(root, "succeed");
+    process.env.CONDUCTOR_OPEN_BIN = fakeOpen;
+    process.env.CONDUCTOR_SESSION_CODEX_MODEL = "o3";
+    process.env.CONDUCTOR_SESSION_CODEX_SANDBOX = "workspace-write";
+    process.env.CONDUCTOR_SESSION_CODEX_APPROVAL = "never";
+    database = createDatabase(join(root, "test.sqlite"));
+    const { app } = createApp(database);
+
+    const project = await request(app).post("/api/projects").send({
+      key: "CDX",
+      name: "Codex session project",
+      repo_root: repo
+    });
+    const epic = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "epic", title: "Epic" });
+    const story = await request(app).post("/api/issues").send({
+      projectId: project.body.id,
+      type: "story",
+      parentId: epic.body.id,
+      title: "Fix the thing"
+    });
+
+    const response = await request(app).post(`/api/issues/${story.body.id}/session`).send({ agent: "codex" });
+    expect(response.status).toBe(202);
+
+    const args: string[] = JSON.parse(readFileSync(receivedArgsPath, "utf8"));
+    const launchScript = readFileSync(args[4], "utf8");
+    expect(launchScript).toContain("--model 'o3'");
+    expect(launchScript).toContain("--sandbox 'workspace-write'");
+    expect(launchScript).toContain("--ask-for-approval 'never'");
   });
 
   it("rejects when the project has no repository configured", async () => {

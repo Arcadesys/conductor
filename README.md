@@ -53,7 +53,10 @@ The suite covers database constraints, plan/approval gates, queue limits, fake-C
 - `CONDUCTOR_DB_PATH`: alternate SQLite path
 - `CONDUCTOR_HOST`: API bind host; defaults to `127.0.0.1`
 - `CONDUCTOR_PORT`: API port; defaults to `4317`
-- `CONDUCTOR_CODEX_BIN`: alternate Codex executable, used by the fake-worker tests
-- `CONDUCTOR_CLAUDE_BIN`: alternate Claude Code executable, used by the fake-worker tests
+- `CONDUCTOR_CODEX_BIN`: alternate Codex executable, used by the fake-worker tests and interactive Codex sessions
+- `CONDUCTOR_CLAUDE_BIN`: alternate Claude Code executable, used by the fake-worker tests and interactive Claude Code sessions
+- `CONDUCTOR_SESSION_CODEX_MODEL`: model for interactive Codex sessions; omitted by default so Codex uses its own configured default
+- `CONDUCTOR_SESSION_CODEX_SANDBOX`: sandbox policy for interactive Codex sessions; defaults to `read-only`
+- `CONDUCTOR_SESSION_CODEX_APPROVAL`: approval policy for interactive Codex sessions; defaults to `on-request`
 
 SQLite runs in WAL mode. A timestamped backup is created at service start and hourly while Conductor is running.

@@ -13,7 +13,30 @@ function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-export async function startInteractiveSession(db: DatabaseSync, dataDir: string, issueId: string) {
+const agentDisplayName = { claude: "Claude Code", codex: "Codex" } as const;
+
+function buildClaudeCommand(promptPath: string) {
+  const claudeBin = process.env.CONDUCTOR_CLAUDE_BIN ?? "claude";
+  const model = process.env.CONDUCTOR_SESSION_MODEL ?? "opus";
+  const permissionMode = process.env.CONDUCTOR_SESSION_PERMISSION_MODE ?? "plan";
+  return `${shellQuote(claudeBin)} --model ${shellQuote(model)} --permission-mode ${shellQuote(permissionMode)} "$(cat ${shellQuote(promptPath)})"`;
+}
+
+function buildCodexCommand(promptPath: string) {
+  const codexBin = process.env.CONDUCTOR_CODEX_BIN ?? "codex";
+  const model = process.env.CONDUCTOR_SESSION_CODEX_MODEL;
+  const sandbox = process.env.CONDUCTOR_SESSION_CODEX_SANDBOX ?? "read-only";
+  const approval = process.env.CONDUCTOR_SESSION_CODEX_APPROVAL ?? "on-request";
+  const modelFlag = model ? `--model ${shellQuote(model)} ` : "";
+  return `${shellQuote(codexBin)} ${modelFlag}--sandbox ${shellQuote(sandbox)} --ask-for-approval ${shellQuote(approval)} "$(cat ${shellQuote(promptPath)})"`;
+}
+
+export async function startInteractiveSession(
+  db: DatabaseSync,
+  dataDir: string,
+  issueId: string,
+  agent: "claude" | "codex" = "claude"
+) {
   const context = getIssueContext(db, issueId);
   const { issue, project } = context;
   if (!project.repo_root) throw httpError(409, "Configure the project repository before starting a session.");
@@ -39,23 +62,22 @@ export async function startInteractiveSession(db: DatabaseSync, dataDir: string,
   const launchPath = join(sessionDir, "launch.sh");
   writeFileSync(promptPath, prompt);
 
-  const claudeBin = process.env.CONDUCTOR_CLAUDE_BIN ?? "claude";
-  const model = process.env.CONDUCTOR_SESSION_MODEL ?? "opus";
-  const permissionMode = process.env.CONDUCTOR_SESSION_PERMISSION_MODE ?? "plan";
+  const agentCommand = agent === "codex" ? buildCodexCommand(promptPath) : buildClaudeCommand(promptPath);
+  const agentName = agentDisplayName[agent];
   // macOS hands GUI-launched apps (Ghostty included, via `open`) a bare-bones PATH from
   // launchd — none of the shell profile's Homebrew/npm/nvm additions. Re-export the PATH
   // this Conductor server process already has (inherited from whatever shell started it)
-  // so `claude` actually resolves instead of the window silently closing on "not found".
+  // so the agent binary actually resolves instead of the window silently closing on "not found".
   const inheritedPath = process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
   const script = [
     "#!/bin/sh",
     `export PATH=${shellQuote(inheritedPath)}`,
     `cd ${shellQuote(workspace)}`,
-    `${shellQuote(claudeBin)} --model ${shellQuote(model)} --permission-mode ${shellQuote(permissionMode)} "$(cat ${shellQuote(promptPath)})"`,
+    agentCommand,
     "status=$?",
     'if [ "$status" -ne 0 ]; then',
     '  echo',
-    '  echo "Claude Code exited with status $status. Press Enter to close this window."',
+    `  echo "${agentName} exited with status $status. Press Enter to close this window."`,
     "  read _",
     "fi",
     "exit $status",
@@ -84,8 +106,8 @@ export async function startInteractiveSession(db: DatabaseSync, dataDir: string,
     issueId,
     "You",
     "session.started",
-    `Started an interactive Claude Code session in ${workspace}.`
+    `Started an interactive ${agentName} session in ${workspace}.`
   );
 
-  return { workspace };
+  return { workspace, agent };
 }
