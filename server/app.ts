@@ -307,6 +307,32 @@ export function createApp(database: ConductorDb) {
     }
   });
 
+  app.post("/api/issues/:id/session/complete", (request, response) => {
+    const issue = database.raw.prepare("SELECT project_id FROM issues WHERE id=?").get(request.params.id) as
+      | { project_id: string }
+      | undefined;
+    if (!issue) throw httpError(404, "Issue not found.");
+    const agent = request.body?.agent === "codex" ? "codex" : "claude";
+    const outcome = ["success", "blocked", "failed"].includes(request.body?.outcome) ? request.body.outcome : "success";
+    const summary = String(request.body?.summary ?? "").trim().slice(0, 4000);
+    const agentName = agent === "codex" ? "Codex" : "Claude Code";
+    const nextStatus = outcome === "success" ? "in_review" : "blocked";
+    database.raw.prepare("UPDATE issues SET status=?,updated_at=? WHERE id=?")
+      .run(nextStatus, new Date().toISOString(), request.params.id);
+    addActivity(
+      database.raw,
+      issue.project_id,
+      request.params.id,
+      agentName,
+      "session.completed",
+      summary || `${agentName} session finished (${outcome}).`
+    );
+    const updated = database.raw.prepare("SELECT * FROM issues WHERE id=?").get(request.params.id);
+    emit({ type: "issue.updated", data: updated });
+    emit({ type: "session.completed", data: { issueId: request.params.id, agent, outcome, summary } });
+    response.json({ ok: true, status: nextStatus });
+  });
+
   app.post("/api/runs/:id/cancel", (request, response) => {
     if (!supervisor.cancel(request.params.id)) throw httpError(409, "Run is not active or queued.");
     response.json({ ok: true });

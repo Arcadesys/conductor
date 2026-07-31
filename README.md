@@ -32,6 +32,7 @@ Then open <http://127.0.0.1:4317>.
 - Merge, deployment, publication, deletion, spending, and external messages require their own action-scope approval.
 - Restarted services mark live runs Interrupted and never relaunch them automatically.
 - Claude worker runs use `--dangerously-skip-permissions` and, like Codex, are confined to the isolated workspace Conductor prepares and gated behind plan-hash approval.
+- Interactive "Start Claude Code/Codex session" windows launch in auto mode (Claude `bypassPermissions`; Codex `workspace-write`/`never`) so the session runs unattended. Each session gets a `report-done.mjs` script and is instructed to run it when finished — Conductor moves the Story to In Review (or Blocked) as soon as it reports.
 
 Configure repository roots, workspace policy, verification commands, and dispatch from Settings. Paperclip import is preview-first, idempotent by source ID, and never writes back to Paperclip.
 
@@ -56,7 +57,8 @@ The suite covers database constraints, plan/approval gates, queue limits, fake-C
 - `CONDUCTOR_CODEX_BIN`: alternate Codex executable, used by the fake-worker tests and interactive Codex sessions
 - `CONDUCTOR_CLAUDE_BIN`: alternate Claude Code executable, used by the fake-worker tests and interactive Claude Code sessions
 - `CONDUCTOR_SESSION_CODEX_MODEL`: model for interactive Codex sessions; omitted by default so Codex uses its own configured default
-- `CONDUCTOR_SESSION_CODEX_SANDBOX`: sandbox policy for interactive Codex sessions; defaults to `read-only`
-- `CONDUCTOR_SESSION_CODEX_APPROVAL`: approval policy for interactive Codex sessions; defaults to `on-request`
+- `CONDUCTOR_SESSION_PERMISSION_MODE`: permission mode for interactive Claude Code sessions; defaults to `bypassPermissions` (auto mode)
+- `CONDUCTOR_SESSION_CODEX_SANDBOX`: sandbox policy for interactive Codex sessions; defaults to `workspace-write` (auto mode)
+- `CONDUCTOR_SESSION_CODEX_APPROVAL`: approval policy for interactive Codex sessions; defaults to `never` (auto mode)
 
 SQLite runs in WAL mode. A timestamped backup is created at service start and hourly while Conductor is running.

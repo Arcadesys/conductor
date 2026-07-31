@@ -34,7 +34,7 @@ ${behavior === "fail" ? 'process.stderr.write("Unable to find application named 
 }
 
 describe("interactive agent sessions", () => {
-  it("runs directly in the project's repo root, seeds a prompt with the location up top, and launches Ghostty in Opus plan mode", async () => {
+  it("runs directly in the project's repo root, seeds a prompt with the location up top, and launches Ghostty in Opus auto mode", async () => {
     const root = mkdtempSync(join(tmpdir(), "conductor-sessions-"));
     const repo = join(root, "repo");
     execFileSync("git", ["init", repo]);
@@ -71,12 +71,20 @@ describe("interactive agent sessions", () => {
     expect(args).toEqual(["-na", "Ghostty", "--args", "-e", expect.stringContaining("launch.sh")]);
     const launchScript = readFileSync(args[4], "utf8");
     expect(launchScript).toContain("--model 'opus'");
-    expect(launchScript).toContain("--permission-mode 'plan'");
+    expect(launchScript).toContain("--permission-mode 'bypassPermissions'");
     expect(launchScript).toContain(repo);
 
     const promptPath = args[4].replace("launch.sh", "prompt.txt");
     const prompt = readFileSync(promptPath, "utf8");
     expect(prompt.startsWith(`Repository: ${repo}`)).toBe(true);
+    expect(prompt).not.toContain("confirm your plan");
+    expect(prompt).toContain("report-done.mjs");
+    expect(prompt).toContain(story.body.issue_key);
+
+    const reportScriptPath = args[4].replace("launch.sh", "report-done.mjs");
+    const reportScript = readFileSync(reportScriptPath, "utf8");
+    expect(reportScript).toContain(`/api/issues/${story.body.id}/session/complete`);
+    expect(reportScript).toContain('"claude"');
 
     const worktrees = execFileSync("git", ["-C", repo, "worktree", "list"]).toString().trim().split("\n");
     expect(worktrees).toHaveLength(1);
@@ -87,7 +95,7 @@ describe("interactive agent sessions", () => {
     expect(activity.message).toContain(repo);
   });
 
-  it("launches an interactive Codex session with the same repo-root workflow, in read-only/on-request mode by default", async () => {
+  it("launches an interactive Codex session with the same repo-root workflow, in workspace-write/never (auto) mode by default", async () => {
     const root = mkdtempSync(join(tmpdir(), "conductor-sessions-"));
     const repo = join(root, "repo");
     execFileSync("git", ["init", repo]);
@@ -120,10 +128,14 @@ describe("interactive agent sessions", () => {
     const args: string[] = JSON.parse(readFileSync(receivedArgsPath, "utf8"));
     const launchScript = readFileSync(args[4], "utf8");
     expect(launchScript).toContain("codex");
-    expect(launchScript).toContain("--sandbox 'read-only'");
-    expect(launchScript).toContain("--ask-for-approval 'on-request'");
+    expect(launchScript).toContain("--sandbox 'workspace-write'");
+    expect(launchScript).toContain("--ask-for-approval 'never'");
     expect(launchScript).not.toContain("--model");
     expect(launchScript).toContain(repo);
+
+    const reportScriptPath = args[4].replace("launch.sh", "report-done.mjs");
+    const reportScript = readFileSync(reportScriptPath, "utf8");
+    expect(reportScript).toContain('"codex"');
 
     const bootstrap = await request(app).get("/api/bootstrap");
     const activity = bootstrap.body.activity.find((item: any) => item.kind === "session.started");
@@ -140,8 +152,8 @@ describe("interactive agent sessions", () => {
     const { path: fakeOpen, receivedArgsPath } = createFakeOpen(root, "succeed");
     process.env.CONDUCTOR_OPEN_BIN = fakeOpen;
     process.env.CONDUCTOR_SESSION_CODEX_MODEL = "o3";
-    process.env.CONDUCTOR_SESSION_CODEX_SANDBOX = "workspace-write";
-    process.env.CONDUCTOR_SESSION_CODEX_APPROVAL = "never";
+    process.env.CONDUCTOR_SESSION_CODEX_SANDBOX = "read-only";
+    process.env.CONDUCTOR_SESSION_CODEX_APPROVAL = "on-request";
     database = createDatabase(join(root, "test.sqlite"));
     const { app } = createApp(database);
 
@@ -164,8 +176,8 @@ describe("interactive agent sessions", () => {
     const args: string[] = JSON.parse(readFileSync(receivedArgsPath, "utf8"));
     const launchScript = readFileSync(args[4], "utf8");
     expect(launchScript).toContain("--model 'o3'");
-    expect(launchScript).toContain("--sandbox 'workspace-write'");
-    expect(launchScript).toContain("--ask-for-approval 'never'");
+    expect(launchScript).toContain("--sandbox 'read-only'");
+    expect(launchScript).toContain("--ask-for-approval 'on-request'");
   });
 
   it("rejects when the project has no repository configured", async () => {
@@ -212,5 +224,63 @@ describe("interactive agent sessions", () => {
     const response = await request(app).post(`/api/issues/${story.body.id}/session`).send();
     expect(response.status).toBe(500);
     expect(response.body.error).toMatch(/ghostty/i);
+  });
+
+  it("moves a Story to In Review when its session reports success", async () => {
+    database = createDatabase(":memory:");
+    const { app } = createApp(database);
+    const project = await request(app).post("/api/projects").send({ key: "RPT", name: "Report project" });
+    const epic = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "epic", title: "Epic" });
+    const story = await request(app).post("/api/issues").send({
+      projectId: project.body.id,
+      type: "story",
+      parentId: epic.body.id,
+      title: "Fix the thing"
+    });
+
+    const response = await request(app)
+      .post(`/api/issues/${story.body.id}/session/complete`)
+      .send({ agent: "claude", outcome: "success", summary: "Fixed the thing and ran the tests." });
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("in_review");
+
+    const bootstrap = await request(app).get("/api/bootstrap");
+    const updated = bootstrap.body.issues.find((item: any) => item.id === story.body.id);
+    expect(updated.status).toBe("in_review");
+    const activity = bootstrap.body.activity.find((item: any) => item.kind === "session.completed");
+    expect(activity).toBeTruthy();
+    expect(activity.message).toContain("Fixed the thing");
+  });
+
+  it("moves a Story to Blocked when its session reports blocked or failed", async () => {
+    database = createDatabase(":memory:");
+    const { app } = createApp(database);
+    const project = await request(app).post("/api/projects").send({ key: "BLK", name: "Blocked project" });
+    const epic = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "epic", title: "Epic" });
+    const story = await request(app).post("/api/issues").send({
+      projectId: project.body.id,
+      type: "story",
+      parentId: epic.body.id,
+      title: "Fix the thing"
+    });
+
+    const response = await request(app)
+      .post(`/api/issues/${story.body.id}/session/complete`)
+      .send({ agent: "codex", outcome: "blocked", summary: "Needs a credential I don't have." });
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("blocked");
+
+    const bootstrap = await request(app).get("/api/bootstrap");
+    const updated = bootstrap.body.issues.find((item: any) => item.id === story.body.id);
+    expect(updated.status).toBe("blocked");
+  });
+
+  it("404s a session/complete report for an unknown issue", async () => {
+    database = createDatabase(":memory:");
+    const { app } = createApp(database);
+    const response = await request(app)
+      .post("/api/issues/does-not-exist/session/complete")
+      .send({ outcome: "success" });
+    expect(response.status).toBe(404);
   });
 });
