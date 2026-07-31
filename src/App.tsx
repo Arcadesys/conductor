@@ -37,6 +37,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  SquareTerminal,
   X
 } from "lucide-react";
 import { api, loadBootstrap, subscribeToEvents } from "./api";
@@ -233,6 +234,15 @@ export function App() {
     await refresh();
   }
 
+  async function startSession(id: string) {
+    try {
+      const result = await api<{ workspace: string }>(`/api/issues/${id}/session`, { method: "POST", body: "{}" });
+      notify(`Session started in ${result.workspace}.`);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function acceptRun(runId: string) {
     try {
       await api(`/api/runs/${runId}/accept`, { method: "POST", body: "{}" });
@@ -376,6 +386,7 @@ export function App() {
           onRequestChanges={requestChanges}
           onAccept={acceptRun}
           onUpdate={updateIssue}
+          onStartSession={startSession}
         />
       )}
       {!inspectorOpen && selectedIssue && (
@@ -425,6 +436,7 @@ export function App() {
           }}
           onUpdate={updateIssue}
           onNotify={notify}
+          onStartSession={startSession}
         />
       )}
       {toast && <div className="toast" role="status">{toast}</div>}
@@ -705,6 +717,7 @@ function Inspector(props: {
   onRequestChanges(plan: Plan): Promise<void>;
   onAccept(runId: string): Promise<void>;
   onUpdate(id: string, changes: Record<string, unknown>): Promise<void>;
+  onStartSession(id: string): Promise<void>;
 }) {
   const related = props.links.map((link) => {
     const id = link.source_issue_id === props.issue.id ? link.target_issue_id : link.source_issue_id;
@@ -721,6 +734,14 @@ function Inspector(props: {
         </div>
       </div>
       <h2>{props.issue.title}</h2>
+      <button
+        className="secondary-button start-session-button"
+        onClick={() => void props.onStartSession(props.issue.id)}
+        disabled={!props.project.repo_root}
+        title={!props.project.repo_root ? "Configure a repository root in Settings before starting a session." : undefined}
+      >
+        <SquareTerminal aria-hidden="true" /> Start Claude Code session
+      </button>
       <div className="issue-meta">
         <span><FileCheck2 /> Story</span>
         <label className={`status-${props.issue.status}`}>
@@ -863,6 +884,7 @@ function IssueContextMenu(props: {
   onOpen(): void;
   onUpdate(id: string, changes: Record<string, unknown>): Promise<void>;
   onNotify(message: string): void;
+  onStartSession(id: string): Promise<void>;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -898,6 +920,15 @@ function IssueContextMenu(props: {
     >
       <div className="context-menu-header"><code>{issue.issue_key}</code><span>{issue.title}</span></div>
       <button role="menuitem" onClick={props.onOpen}><FileCheck2 aria-hidden="true" /> Open</button>
+      <button
+        role="menuitem"
+        onClick={() => {
+          void props.onStartSession(issue.id);
+          props.onClose();
+        }}
+      >
+        <SquareTerminal aria-hidden="true" /> Start Claude Code session
+      </button>
       <button
         role="menuitem"
         onClick={() => {
