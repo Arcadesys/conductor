@@ -50,11 +50,18 @@ test("board lets you start a Claude Code session from a selected ticket", async 
   await expect(sessionButton).toBeVisible();
   await expect(sessionButton).toBeEnabled();
 
+  const codexSessionButton = page.getByRole("button", { name: "Start Codex session", exact: true });
+  await expect(codexSessionButton).toBeVisible();
+  await expect(codexSessionButton).toBeEnabled();
+
   await card.click({ button: "right" });
   const sessionMenuItem = page.getByRole("menuitem", { name: "Start Claude Code session", exact: true });
   await expect(sessionMenuItem).toBeVisible();
+  const codexSessionMenuItem = page.getByRole("menuitem", { name: "Start Codex session", exact: true });
+  await expect(codexSessionMenuItem).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(sessionMenuItem).toBeHidden();
+  await expect(codexSessionMenuItem).toBeHidden();
 });
 
 test("200 percent layout collapses navigation and uses full-width issue detail", async ({ page }) => {

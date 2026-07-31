@@ -298,7 +298,8 @@ export function createApp(database: ConductorDb) {
 
   app.post("/api/issues/:id/session", async (request, response, next) => {
     try {
-      const result = await startInteractiveSession(database.raw, resolve(database.path, ".."), request.params.id);
+      const agent = request.body?.agent === "codex" ? "codex" : "claude";
+      const result = await startInteractiveSession(database.raw, resolve(database.path, ".."), request.params.id, agent);
       emit({ type: "session.started", data: { issueId: request.params.id, ...result } });
       response.status(202).json(result);
     } catch (error) {
