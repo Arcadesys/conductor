@@ -1,15 +1,13 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
-import { execFile } from "node:child_process";
+import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { addActivity, createPlan, getIssueContext } from "./db.ts";
+import { createWorktree } from "./git.ts";
 import { planOutputSchema, receiptOutputSchema } from "./schemas.ts";
 import type { PlanPayload, ReceiptPayload } from "./types.ts";
 
-const execFileAsync = promisify(execFile);
 const timestamp = () => new Date().toISOString();
 
 type Emit = (event: { type: string; data: unknown }) => void;
@@ -319,12 +317,14 @@ export class WorkerSupervisor {
   private async prepareWorkspace(runId: string, context: ReturnType<typeof getIssueContext>) {
     const project = context.project;
     if (project.workspace_policy === "shared") return project.repo_root as string;
-    const parent = (project.worktree_parent as string | null) ?? join(dirname(project.repo_root as string), "conductor-worktrees");
-    mkdirSync(parent, { recursive: true });
     const issueKey = String(context.issue.issue_key).toLowerCase();
-    const workspace = join(parent, `${issueKey}-${runId.slice(0, 8)}`);
-    const branch = `conductor/${issueKey}-${runId.slice(0, 8)}`;
-    await execFileAsync("git", ["-C", project.repo_root as string, "worktree", "add", "-b", branch, workspace, "HEAD"]);
+    const dirName = `${issueKey}-${runId.slice(0, 8)}`;
+    const workspace = await createWorktree(
+      project.repo_root as string,
+      project.worktree_parent as string | null,
+      dirName,
+      `conductor/${dirName}`
+    );
     this.db.prepare("UPDATE runs SET workspace=?,updated_at=? WHERE id=?").run(workspace, timestamp(), runId);
     return workspace;
   }

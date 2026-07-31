@@ -34,6 +34,7 @@ export function subscribeToEvents(onEvent: () => void) {
     "run.finished",
     "run.review_ready",
     "run.accepted",
+    "session.started",
     "import.committed",
     "queue.changed"
   ];

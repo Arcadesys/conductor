@@ -13,6 +13,7 @@ import {
   wouldCreateBlockCycle
 } from "./db.ts";
 import { commitPaperclipImport, previewPaperclip } from "./importer.ts";
+import { startInteractiveSession } from "./sessions.ts";
 import { WorkerSupervisor } from "./workers.ts";
 
 type EventPayload = { type: string; data: unknown };
@@ -293,6 +294,16 @@ export function createApp(database: ConductorDb) {
     const runId = supervisor.queueWorker(plan.issue_id, plan.id);
     emit({ type: "plan.approved", data: { ...approval, runId } });
     response.status(202).json({ approval, runId });
+  });
+
+  app.post("/api/issues/:id/session", async (request, response, next) => {
+    try {
+      const result = await startInteractiveSession(database.raw, resolve(database.path, ".."), request.params.id);
+      emit({ type: "session.started", data: { issueId: request.params.id, ...result } });
+      response.status(202).json(result);
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/api/runs/:id/cancel", (request, response) => {

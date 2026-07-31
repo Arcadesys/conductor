@@ -34,6 +34,29 @@ test("desktop backlog preserves the approval gate and accessible shell", async (
   expect(outline).toBeGreaterThanOrEqual(3);
 });
 
+test("board lets you start a Claude Code session from a selected ticket", async ({ page }) => {
+  // Verifies the UX entry points exist and are wired up; deliberately never clicks
+  // them through, since the dev server here runs against real project data and a
+  // real click would spawn an actual Ghostty window or mutate a real git worktree.
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+
+  const card = page.locator(".board-column button").first();
+  await expect(card).toBeVisible();
+  await card.click();
+
+  const sessionButton = page.getByRole("button", { name: "Start Claude Code session", exact: true });
+  await expect(sessionButton).toBeVisible();
+  await expect(sessionButton).toBeEnabled();
+
+  await card.click({ button: "right" });
+  const sessionMenuItem = page.getByRole("menuitem", { name: "Start Claude Code session", exact: true });
+  await expect(sessionMenuItem).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sessionMenuItem).toBeHidden();
+});
+
 test("200 percent layout collapses navigation and uses full-width issue detail", async ({ page }) => {
   await page.setViewportSize({ width: 720, height: 1000 });
   await page.goto("/");
