@@ -1,7 +1,8 @@
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../server/app.ts";
@@ -16,6 +17,8 @@ afterEach(() => {
   delete process.env.CONDUCTOR_SESSION_CODEX_MODEL;
   delete process.env.CONDUCTOR_SESSION_CODEX_SANDBOX;
   delete process.env.CONDUCTOR_SESSION_CODEX_APPROVAL;
+  delete process.env.CONDUCTOR_CLAUDE_BIN;
+  delete process.env.CONDUCTOR_PORT;
 });
 
 function createFakeOpen(directory: string, behavior: "succeed" | "fail") {
@@ -31,6 +34,19 @@ ${behavior === "fail" ? 'process.stderr.write("Unable to find application named 
   );
   chmodSync(path, 0o755);
   return { path, receivedArgsPath };
+}
+
+function receiptPathFrom(reportScriptPath: string) {
+  const reportScript = readFileSync(reportScriptPath, "utf8");
+  const match = reportScript.match(/const receiptPath = (.+);/);
+  if (!match) throw new Error("Generated report script has no receipt path.");
+  return JSON.parse(match[1]) as string;
+}
+
+function runCommand(path: string) {
+  return new Promise<number | null>((resolve) => {
+    spawn(path, [], { stdio: "pipe" }).on("close", resolve);
+  });
 }
 
 describe("interactive agent sessions", () => {
@@ -83,8 +99,14 @@ describe("interactive agent sessions", () => {
 
     const reportScriptPath = args[4].replace("launch.sh", "report-done.mjs");
     const reportScript = readFileSync(reportScriptPath, "utf8");
-    expect(reportScript).toContain(`/api/issues/${story.body.id}/session/complete`);
+    expect(reportScript).toContain("Wrote completion receipt");
     expect(reportScript).toContain('"claude"');
+    expect(reportScript).not.toContain("fetch(");
+    expect(reportScript).not.toContain("/api/issues/");
+    expect(receiptPathFrom(reportScriptPath)).toContain(join(repo, ".conductor", "sessions"));
+    const submitScript = readFileSync(args[4].replace("launch.sh", "submit-report.mjs"), "utf8");
+    expect(submitScript).toContain(`/api/issues/${story.body.id}/session/complete`);
+    expect(launchScript).toContain("submit-report.mjs");
 
     const worktrees = execFileSync("git", ["-C", repo, "worktree", "list"]).toString().trim().split("\n");
     expect(worktrees).toHaveLength(1);
@@ -136,6 +158,7 @@ describe("interactive agent sessions", () => {
     const reportScriptPath = args[4].replace("launch.sh", "report-done.mjs");
     const reportScript = readFileSync(reportScriptPath, "utf8");
     expect(reportScript).toContain('"codex"');
+    expect(reportScript).not.toContain("fetch(");
 
     const bootstrap = await request(app).get("/api/bootstrap");
     const activity = bootstrap.body.activity.find((item: any) => item.kind === "session.started");
@@ -226,6 +249,81 @@ describe("interactive agent sessions", () => {
     expect(response.body.error).toMatch(/ghostty/i);
   });
 
+  it("submits a sandbox-safe receipt after the agent exits and removes it on success", async () => {
+    const root = mkdtempSync(join(tmpdir(), "conductor-sessions-"));
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "init"]);
+    const { path: fakeOpen, receivedArgsPath } = createFakeOpen(root, "succeed");
+    const fakeClaude = join(root, "fake-claude.mjs");
+    writeFileSync(fakeClaude, `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+const prompt = process.argv.at(-1);
+const reportPath = prompt.match(/node (.+report-done\\.mjs) success/)[1];
+execFileSync(process.execPath, [reportPath, "success", "Completed safely."], { stdio: "inherit" });
+`);
+    chmodSync(fakeClaude, 0o755);
+    process.env.CONDUCTOR_OPEN_BIN = fakeOpen;
+    process.env.CONDUCTOR_CLAUDE_BIN = fakeClaude;
+    database = createDatabase(join(root, "test.sqlite"));
+    const { app } = createApp(database);
+    const server = app.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    process.env.CONDUCTOR_PORT = String((server.address() as { port: number }).port);
+    try {
+      const project = await request(app).post("/api/projects").send({ key: "RCP", name: "Receipt project", repo_root: repo });
+      const epic = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "epic", title: "Epic" });
+      const story = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "story", parentId: epic.body.id, title: "Fix the thing" });
+
+      expect((await request(app).post(`/api/issues/${story.body.id}/session`).send()).status).toBe(202);
+      const launchPath = (JSON.parse(readFileSync(receivedArgsPath, "utf8")) as string[])[4];
+      const reportPath = launchPath.replace("launch.sh", "report-done.mjs");
+      const receiptPath = receiptPathFrom(reportPath);
+      expect(await runCommand(launchPath)).toBe(0);
+
+      expect(existsSync(receiptPath)).toBe(false);
+      const bootstrap = await request(app).get("/api/bootstrap");
+      expect(bootstrap.body.issues.find((item: any) => item.id === story.body.id).status).toBe("in_review");
+      expect(bootstrap.body.activity.find((item: any) => item.kind === "session.completed").message).toContain("Completed safely.");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("retains invalid or unsubmitted receipts without changing issue status", async () => {
+    const root = mkdtempSync(join(tmpdir(), "conductor-sessions-"));
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "init"]);
+    const { path: fakeOpen, receivedArgsPath } = createFakeOpen(root, "succeed");
+    process.env.CONDUCTOR_OPEN_BIN = fakeOpen;
+    process.env.CONDUCTOR_PORT = "1";
+    database = createDatabase(join(root, "test.sqlite"));
+    const { app } = createApp(database);
+    const project = await request(app).post("/api/projects").send({ key: "BAD", name: "Receipt project", repo_root: repo });
+    const epic = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "epic", title: "Epic" });
+    const story = await request(app).post("/api/issues").send({ projectId: project.body.id, type: "story", parentId: epic.body.id, title: "Fix the thing" });
+    expect((await request(app).post(`/api/issues/${story.body.id}/session`).send({ agent: "codex" })).status).toBe(202);
+    const launchPath = (JSON.parse(readFileSync(receivedArgsPath, "utf8")) as string[])[4];
+    const reportPath = launchPath.replace("launch.sh", "report-done.mjs");
+    const submitPath = launchPath.replace("launch.sh", "submit-report.mjs");
+    const receiptPath = receiptPathFrom(reportPath);
+
+    expect(spawnSync(process.execPath, [submitPath]).status).toBe(0);
+    mkdirSync(dirname(receiptPath), { recursive: true });
+    writeFileSync(receiptPath, "not json");
+    expect(spawnSync(process.execPath, [submitPath]).status).toBe(1);
+    expect(existsSync(receiptPath)).toBe(true);
+    writeFileSync(receiptPath, JSON.stringify({ sessionId: "wrong", agent: "codex", outcome: "success", summary: "Nope" }));
+    expect(spawnSync(process.execPath, [submitPath]).status).toBe(1);
+    expect(existsSync(receiptPath)).toBe(true);
+    const sessionId = receiptPath.match(/\/([0-9a-f-]+)\.json$/)?.[1];
+    writeFileSync(receiptPath, JSON.stringify({ sessionId, agent: "codex", outcome: "blocked", summary: "API is down" }));
+    expect(spawnSync(process.execPath, [submitPath]).status).toBe(1);
+    expect(existsSync(receiptPath)).toBe(true);
+    expect((await request(app).get("/api/bootstrap")).body.issues.find((item: any) => item.id === story.body.id).status).toBe("backlog");
+  });
+
   it("moves a Story to In Review when its session reports success", async () => {
     database = createDatabase(":memory:");
     const { app } = createApp(database);
@@ -252,7 +350,7 @@ describe("interactive agent sessions", () => {
     expect(activity.message).toContain("Fixed the thing");
   });
 
-  it("moves a Story to Blocked when its session reports blocked or failed", async () => {
+  it.each(["blocked", "failed"])("moves a Story to Blocked when its session reports %s", async (outcome) => {
     database = createDatabase(":memory:");
     const { app } = createApp(database);
     const project = await request(app).post("/api/projects").send({ key: "BLK", name: "Blocked project" });
@@ -266,7 +364,7 @@ describe("interactive agent sessions", () => {
 
     const response = await request(app)
       .post(`/api/issues/${story.body.id}/session/complete`)
-      .send({ agent: "codex", outcome: "blocked", summary: "Needs a credential I don't have." });
+      .send({ agent: "codex", outcome, summary: "Needs a credential I don't have." });
     expect(response.status).toBe(200);
     expect(response.body.status).toBe("blocked");
 

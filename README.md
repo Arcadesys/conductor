@@ -32,7 +32,7 @@ Then open <http://127.0.0.1:4317>.
 - Merge, deployment, publication, deletion, spending, and external messages require their own action-scope approval.
 - Restarted services mark live runs Interrupted and never relaunch them automatically.
 - Claude worker runs use `--dangerously-skip-permissions` and, like Codex, are confined to the isolated workspace Conductor prepares and gated behind plan-hash approval.
-- Interactive "Start Claude Code/Codex session" windows launch in auto mode (Claude `bypassPermissions`; Codex `workspace-write`/`never`) so the session runs unattended. Each session gets a `report-done.mjs` script and is instructed to run it when finished — Conductor moves the Story to In Review (or Blocked) as soon as it reports.
+- Interactive "Start Claude Code/Codex session" windows launch in auto mode (Claude `bypassPermissions`; Codex `workspace-write`/`never`) so the session runs unattended. `report-done.mjs` writes an atomic, temporary receipt in the repository; after the agent exits, Conductor's host-side launcher submits it and moves the Story to In Review (or Blocked). Failed submissions retain the receipt and print a retry command.
 
 Configure repository roots, workspace policy, verification commands, and dispatch from Settings. Paperclip import is preview-first, idempotent by source ID, and never writes back to Paperclip.
 

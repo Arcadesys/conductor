@@ -1047,6 +1047,12 @@ p {
   padding: 10px;
   border: 1px solid var(--border);
   background: var(--surface);
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.board-column.drag-over {
+  border-color: var(--blue);
+  background: var(--surface-2);
 }
 
 .board-column h2 {
@@ -1067,6 +1073,13 @@ p {
   background: var(--surface-2);
   border: 1px solid var(--border);
   text-align: left;
+  cursor: grab;
+  transition: opacity 0.12s ease;
+}
+
+.board-column > button.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
 }
 
 .board-column > button span {

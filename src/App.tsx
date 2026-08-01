@@ -213,6 +213,27 @@ export function App() {
     await updateIssue(draggedId, { rank: (before + target) / 2 });
   }
 
+  async function moveCard(draggedId: string, status: IssueStatus, beforeId?: string) {
+    if (!draggedId || draggedId === beforeId) return;
+    const dragged = projectIssues.find((issue) => issue.id === draggedId);
+    if (!dragged) return;
+    const changes: Record<string, unknown> = {};
+    if (dragged.status !== status) changes.status = status;
+    const columnStories = projectIssues
+      .filter((issue) => issue.type === "story" && issue.status === status && issue.id !== draggedId)
+      .sort((a, b) => a.rank - b.rank);
+    if (beforeId) {
+      const targetIndex = columnStories.findIndex((issue) => issue.id === beforeId);
+      const before = columnStories[targetIndex - 1]?.rank ?? 0;
+      const target = columnStories[targetIndex]?.rank ?? before + 2;
+      changes.rank = (before + target) / 2;
+    } else if (dragged.status !== status) {
+      const last = columnStories[columnStories.length - 1];
+      changes.rank = (last?.rank ?? 0) + 1;
+    }
+    if (Object.keys(changes).length) await updateIssue(draggedId, changes);
+  }
+
   async function approve(plan: Plan) {
     try {
       await api(`/api/plans/${plan.id}/approve`, { method: "POST", body: JSON.stringify({ actionScope: "repo_write" }) });
@@ -361,6 +382,7 @@ export function App() {
               setInspectorOpen(true);
             }}
             onContextMenu={handleContextMenu}
+            onMove={moveCard}
           />
         )}
         {view === "all" && (
@@ -834,22 +856,72 @@ function Inspector(props: {
 function Board({
   issues,
   onIssue,
-  onContextMenu
+  onContextMenu,
+  onMove
 }: {
   issues: Issue[];
   onIssue(id: string): void;
   onContextMenu(event: ReactMouseEvent, id: string): void;
+  onMove(draggedId: string, status: IssueStatus, beforeId?: string): Promise<void>;
 }) {
   const columns: IssueStatus[] = ["backlog", "todo", "in_progress", "in_review", "done"];
+  const [dragged, setDragged] = useState("");
+  const [dragOverColumn, setDragOverColumn] = useState<IssueStatus | "">("");
+
+  function drop(status: IssueStatus, beforeId?: string) {
+    if (dragged) void onMove(dragged, status, beforeId);
+    setDragged("");
+    setDragOverColumn("");
+  }
+
   return (
     <section className="secondary-view">
       <div className="view-heading"><div><h1>Board</h1><p>Current work by workflow state</p></div></div>
       <div className="board-grid">
         {columns.map((status) => (
-          <section className="board-column" key={status}>
+          <section
+            className={`board-column ${dragOverColumn === status ? "drag-over" : ""}`}
+            key={status}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragOverColumn(status);
+            }}
+            onDragLeave={(event) => {
+              if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+              setDragOverColumn((current) => (current === status ? "" : current));
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              drop(status);
+            }}
+          >
             <h2>{statusLabel[status]} <span>{issues.filter((issue) => issue.status === status).length}</span></h2>
             {issues.filter((issue) => issue.status === status).map((issue) => (
-              <button key={issue.id} onClick={() => onIssue(issue.id)} onContextMenu={(event) => onContextMenu(event, issue.id)}>
+              <button
+                key={issue.id}
+                className={dragged === issue.id ? "dragging" : ""}
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = "move";
+                  setDragged(issue.id);
+                }}
+                onDragEnd={() => {
+                  setDragged("");
+                  setDragOverColumn("");
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setDragOverColumn(status);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  drop(status, issue.id);
+                }}
+                onClick={() => onIssue(issue.id)}
+                onContextMenu={(event) => onContextMenu(event, issue.id)}
+              >
                 <code>{issue.issue_key}</code><strong>{issue.title}</strong>
                 <span>{agentLabel[issue.agent_state]}</span>
               </button>

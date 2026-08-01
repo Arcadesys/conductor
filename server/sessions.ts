@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { addActivity, getIssueContext } from "./db.ts";
 
@@ -35,25 +35,57 @@ function buildCodexCommand(promptPath: string) {
   return `${shellQuote(codexBin)} ${modelFlag}--sandbox ${shellQuote(sandbox)} --ask-for-approval ${shellQuote(approval)} "$(cat ${shellQuote(promptPath)})"`;
 }
 
-function buildReportScript(reportUrl: string, agent: "claude" | "codex") {
+function buildReportScript(receiptPath: string, sessionId: string, agent: "claude" | "codex") {
   return `#!/usr/bin/env node
-// Tells Conductor this session is done so the ticket can move to In Review for human review.
+// Writes a completion receipt for Conductor's host-side launcher to submit after this session exits.
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 const [outcome, ...rest] = process.argv.slice(2);
 const summary = rest.join(" ");
 if (!["success", "blocked", "failed"].includes(outcome)) {
   console.error("Usage: node report-done.mjs <success|blocked|failed> \\"<summary>\\"");
   process.exit(1);
 }
-const response = await fetch(${JSON.stringify(reportUrl)}, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ agent: ${JSON.stringify(agent)}, outcome, summary })
-});
-if (!response.ok) {
-  console.error(\`Conductor did not accept the report: \${response.status} \${await response.text()}\`);
+const receiptPath = ${JSON.stringify(receiptPath)};
+mkdirSync(dirname(receiptPath), { recursive: true });
+const temporaryPath = \`\${receiptPath}.\${process.pid}.tmp\`;
+writeFileSync(temporaryPath, JSON.stringify({ sessionId: ${JSON.stringify(sessionId)}, agent: ${JSON.stringify(agent)}, outcome, summary }), { mode: 0o600 });
+renameSync(temporaryPath, receiptPath);
+console.log("Wrote completion receipt. Conductor will submit it after this session exits.");
+`;
+}
+
+function buildSubmitReportScript(reportUrl: string, receiptPath: string, sessionId: string, agent: "claude" | "codex") {
+  return `#!/usr/bin/env node
+// Runs outside the agent sandbox after the interactive session exits.
+import { existsSync, readFileSync, rmSync } from "node:fs";
+const receiptPath = ${JSON.stringify(receiptPath)};
+if (!existsSync(receiptPath)) process.exit(0);
+let receipt;
+try {
+  receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+} catch {
+  console.error(\`Invalid Conductor completion receipt: \${receiptPath}\`);
   process.exit(1);
 }
-console.log("Reported to Conductor.");
+const validOutcome = ["success", "blocked", "failed"].includes(receipt?.outcome);
+if (receipt?.sessionId !== ${JSON.stringify(sessionId)} || receipt?.agent !== ${JSON.stringify(agent)} || !validOutcome || typeof receipt?.summary !== "string" || receipt.summary.length > 4000) {
+  console.error(\`Invalid Conductor completion receipt: \${receiptPath}\`);
+  process.exit(1);
+}
+try {
+  const response = await fetch(${JSON.stringify(reportUrl)}, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: receipt.agent, outcome: receipt.outcome, summary: receipt.summary })
+  });
+  if (!response.ok) throw new Error(\`\${response.status} \${await response.text()}\`);
+  rmSync(receiptPath);
+  console.log("Reported to Conductor.");
+} catch (error) {
+  console.error(\`Conductor did not accept the receipt: \${error instanceof Error ? error.message : String(error)}\`);
+  process.exit(1);
+}
 `;
 }
 
@@ -77,6 +109,8 @@ export async function startInteractiveSession(
   const promptPath = join(sessionDir, "prompt.txt");
   const launchPath = join(sessionDir, "launch.sh");
   const reportPath = join(sessionDir, "report-done.mjs");
+  const submitReportPath = join(sessionDir, "submit-report.mjs");
+  const receiptPath = join(workspace, ".conductor", "sessions", `${sessionId}.json`);
 
   const reportHost = process.env.CONDUCTOR_HOST ?? "127.0.0.1";
   const reportPort = process.env.CONDUCTOR_PORT ?? "4317";
@@ -94,14 +128,16 @@ export async function startInteractiveSession(
       `  node ${reportPath} success "<one-paragraph summary of what you changed>"`,
       `  node ${reportPath} blocked "<what's blocking you and what's needed to continue>"`,
       `  node ${reportPath} failed "<what went wrong>"`,
-      `This is required: it's how Conductor learns you're done and moves ${issue.issue_key} into the In Review column for human review.`
+      `This writes a completion receipt. After this session exits, Conductor submits it and moves ${issue.issue_key} to In Review (or Blocked).`
     ].join("\n")
   ].join("\n\n");
 
   mkdirSync(sessionDir, { recursive: true });
   writeFileSync(promptPath, prompt);
-  writeFileSync(reportPath, buildReportScript(reportUrl, agent));
+  writeFileSync(reportPath, buildReportScript(receiptPath, sessionId, agent));
   chmodSync(reportPath, 0o755);
+  writeFileSync(submitReportPath, buildSubmitReportScript(reportUrl, receiptPath, sessionId, agent));
+  chmodSync(submitReportPath, 0o755);
 
   const agentCommand = agent === "codex" ? buildCodexCommand(promptPath) : buildClaudeCommand(promptPath);
   const agentName = agentDisplayName[agent];
@@ -116,6 +152,14 @@ export async function startInteractiveSession(
     `cd ${shellQuote(workspace)}`,
     agentCommand,
     "status=$?",
+    `node ${shellQuote(submitReportPath)}`,
+    "report_status=$?",
+    'if [ "$report_status" -ne 0 ]; then',
+    '  echo',
+    `  echo "Conductor handoff failed. Retry with: node ${submitReportPath}"`,
+    "  read _",
+    "  exit $report_status",
+    "fi",
     'if [ "$status" -ne 0 ]; then',
     '  echo',
     `  echo "${agentName} exited with status $status. Press Enter to close this window."`,
