@@ -2,6 +2,22 @@
 
 Conductor is a local Jira-shaped orchestration layer for approval-gated agent work. It keeps project work, immutable plans, approvals, runs, receipts, and Paperclip import history in a service-owned SQLite database.
 
+## Engineering highlights
+
+- Durable planner → worker → evaluator orchestration with configurable Codex and Claude execution
+- Immutable plan hashes and approval gates that prevent execution drift
+- Per-action human authorization for merge, deployment, publication, deletion, spending, and messaging
+- Isolated workspaces, crash-safe SQLite state, interruption recovery, and idempotent imports
+- Automated verification, end-to-end coverage, keyboard checks, and 200% zoom testing
+- A hard human-review boundary: successful work stops in **In Review**, never **Done**
+
+### Architecture
+
+```text
+Human → Planner → Plan approval → Worker → Evaluator → Human review
+                              ↘ SQLite state · isolated workspace · scoped tools
+```
+
 ## Run locally
 
 Requirements: Node.js 24 or newer, npm, Git, and the `codex` and/or `claude` executable on `PATH` for whichever agent(s) you select per role (planner/worker/evaluator, configurable per project in Settings).
